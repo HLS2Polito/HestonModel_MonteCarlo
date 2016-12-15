@@ -31,8 +31,8 @@ void hestonEuro(data_t *pCall, data_t *pPut,   // call price and put price
 		data_t freeRate,			// interest rate of the riskless asset
 		data_t volatility,			// volatility of the risky asset
 		data_t initPrice,			// stock price at time 0
-		data_t strikePrice,			// strike price
-		int num_sims)
+		data_t strikePrice			// strike price
+		)
 {
 #pragma HLS INTERFACE m_axi port=pCall bundle=gmem
 #pragma HLS INTERFACE s_axilite port=pCall bundle=control
@@ -56,15 +56,13 @@ void hestonEuro(data_t *pCall, data_t *pPut,   // call price and put price
 #pragma HLS INTERFACE s_axilite port=initPrice bundle=control
 #pragma HLS INTERFACE s_axilite port=strikePrice bundle=gmem
 #pragma HLS INTERFACE s_axilite port=strikePrice bundle=control
-#pragma HLS INTERFACE s_axilite port=num_sims bundle=gmem
-#pragma HLS INTERFACE s_axilite port=num_sims bundle=control
 #pragma HLS INTERFACE s_axilite port=return bundle=control
 
 	volData vol(expect,kappa,variance,volatility,correlation);
 	stockData sd(timeT,freeRate,volatility,initPrice,strikePrice);
 	heston bs(sd,vol);
 	data_t call,put;
-	bs.simulation(&call,&put,num_sims);
+	bs.simulation(&call,&put);
 
 	*pCall=call;
 	*pPut=put;
@@ -74,13 +72,14 @@ void hestonEuro(data_t *pCall, data_t *pPut,   // call price and put price
 const int heston::NUM_RNGS=2;
 const int heston::NUM_SIMGROUPS=2;
 const int heston::NUM_STEPS=16;
+const int heston::NUM_SIMS=16;
 
 heston::heston(stockData data,volData vol):data(data),vol(vol)
 {
 }
 
 
-void heston::simulation(data_t* pCall, data_t *pPut, int num_sims)
+void heston::simulation(data_t* pCall, data_t *pPut)
 {
 
 	RNG mt_rng[NUM_RNGS];
@@ -95,22 +94,22 @@ void heston::simulation(data_t* pCall, data_t *pPut, int num_sims)
 		seeds[i]=i;
 	}
 	RNG::init_array(mt_rng,seeds,NUM_RNGS);
-	return sampleSIM(mt_rng,pCall,pPut,num_sims);
+	return sampleSIM(mt_rng,pCall,pPut);
 
 }
 
-void heston::sampleSIM(RNG* mt_rng, data_t* call,data_t* put, int num_sims)
+void heston::sampleSIM(RNG* mt_rng, data_t* call,data_t* put)
 {
 	const data_t Dt=data.timeT/NUM_STEPS,
 			ratio1=expf(-data.freeRate*data.timeT)*data.strikePrice,
-			ratio2=sqrtf(fmaxf(1-vol.correlation*vol.correlation,0)),
+			ratio2=sqrtf(fmaxf(1.0f-vol.correlation*vol.correlation,0.0f)),
 			ratio3=Dt*data.freeRate,
 			ratio4=vol.kappa*vol.expect*Dt,
 			logPrice = logf(data.initPrice/data.strikePrice),
-			volInit = fmaxf(vol.initValue,0)*Dt;
+			volInit = fmaxf(vol.initValue,0.0f)*Dt;
 
 	const int sPath=NUM_RNGS*NUM_SIMGROUPS;
-	data_t fCall=0,fPut=0;
+	data_t fCall=0.0f,fPut=0.0f;
 
 	data_t sCall[NUM_RNGS],sPut[NUM_RNGS];
 #pragma HLS ARRAY_PARTITION variable=sCall complete dim=1
@@ -129,8 +128,8 @@ void heston::sampleSIM(RNG* mt_rng, data_t* call,data_t* put, int num_sims)
 	for(int i =0;i<NUM_RNGS;i++)
 	{
 #pragma HLS UNROLL
-		sCall[i]=0;
-		sPut[i]=0;
+		sCall[i]=0.0f;
+		sPut[i]=0.0f;
 	}
 	loop_init:for(int s=0;s<NUM_SIMGROUPS;s++)
 	{
@@ -142,7 +141,7 @@ void heston::sampleSIM(RNG* mt_rng, data_t* call,data_t* put, int num_sims)
 			pVols[i][s]=volInit;
 		}
 	}
-	loop_main:for(int j=0;j<num_sims;j++)
+	loop_main:for(int j=0;j<NUM_SIMS;j++)
 	{
 		loop_path:for(int path=0;path<NUM_STEPS;path++)
 		{
@@ -158,7 +157,7 @@ void heston::sampleSIM(RNG* mt_rng, data_t* call,data_t* put, int num_sims)
 					stockPrice[i][s]+=ratio3-pVols[i][s]*0.5f
 							+num1[i][s]*vol.correlation+num2[i][s]*ratio2;
 
-					pVols[i][s]=fmaxf(vols[i][s],0)*Dt;
+					pVols[i][s]=fmaxf(vols[i][s],0.0f)*Dt;
 				}
 			}
 
@@ -169,13 +168,14 @@ void heston::sampleSIM(RNG* mt_rng, data_t* call,data_t* put, int num_sims)
 			loop_sum_r:for(int i =0;i<NUM_RNGS;i++)
 			{
 	#pragma HLS UNROLL
-				if(stockPrice[i][s]>0)
+				float payoff = expf(stockPrice[i][s])-1.0f;
+				if(stockPrice[i][s]>0.0f)
 				{
-					sCall[i]+=expf(stockPrice[i][s])-1.0f;
+					sCall[i]+=payoff;
 				}
 				else
 				{
-					sPut[i]+=1.0f-expf(stockPrice[i][s]);
+					sPut[i]-=payoff;
 				}
 				stockPrice[i][s]=logPrice;
 				vols[i][s]=vol.initValue;
@@ -189,6 +189,6 @@ void heston::sampleSIM(RNG* mt_rng, data_t* call,data_t* put, int num_sims)
 		fCall+=sCall[i];
 		fPut+=sPut[i];
 	}
-	*call= ratio1*fCall/NUM_RNGS/num_sims/NUM_SIMGROUPS;
-	*put= ratio1*fPut/NUM_RNGS/num_sims/NUM_SIMGROUPS;
+	*call= ratio1*fCall/NUM_RNGS/NUM_SIMS/NUM_SIMGROUPS;
+	*put= ratio1*fPut/NUM_RNGS/NUM_SIMS/NUM_SIMGROUPS;
 }
